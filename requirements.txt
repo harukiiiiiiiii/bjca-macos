@@ -1,0 +1,29 @@
+# BJCA Certificate Environment - macOS Native Implementation
+# Core dependencies
+
+# Async HTTP + WebSocket server (replaces Apache+mod_ajax+mod_websocket)
+aiohttp>=3.9.0
+aiohttp-cors>=0.7.0
+
+# Smart card / PC/SC communication (replaces WinSCard.dll)
+pyscard>=2.0.7
+
+# PKCS#11 interface (replaces NSS PKCS#11 bridge)
+python-pkcs11>=0.7.0
+
+# HID USB token support (Longmai GM3000 / SKF-over-HID)
+hidapi>=0.14.0
+
+# Chinese national cryptography (SM2/SM3/SM4 - replaces CSSM.dll crypto)
+gmssl>=3.2.2
+
+# ASN.1 / X.509 certificate handling
+cryptography>=41.0.0
+pyOpenSSL>=23.0.0
+
+# PKCS#7 / CMS operations
+asn1crypto>=1.5.1
+
+# System integration
+pyobjc-framework-CryptoTokenKit>=10.0  # macOS native smart card
+pyobjc-framework-Security>=10.0

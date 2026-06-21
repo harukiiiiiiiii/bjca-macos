@@ -1,0 +1,22 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Build and release artifacts
+build/
+dist/
+
+# Local runtime and logs
+.bjca/
+*.log
+
+# Local TLS/private key material
+config/server.key
+config/server.crt
+*.pem
+*.p12
+*.pfx
+
+# Vendor or proprietary binary drops
+*.dylib

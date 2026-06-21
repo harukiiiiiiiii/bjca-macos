@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bjca.certservice</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/BJCA/bin/bjca-service</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>21061</string>
+        <string>--log-level</string>
+        <string>info</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Library/BJCA/log/stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Library/BJCA/log/stderr.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Library/BJCA</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>BJCA_ROOT</key>
+        <string>/Library/BJCA</string>
+        <key>BJCA_HOST</key>
+        <string>127.0.0.1</string>
+        <key>BJCA_PORT</key>
+        <string>21061</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>Nice</key>
+    <integer>0</integer>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>
