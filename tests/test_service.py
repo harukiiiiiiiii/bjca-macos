@@ -295,6 +295,53 @@ def test_sof_login_does_not_cache_plain_pin():
     asyncio.run(run())
 
 
+def test_gm3000_verify_pin_accepts_skf_success_code():
+    """Verify GM3000 VerifyPIN accepts SKF success payloads."""
+    from bjca_service.longmai_gm3000 import GM3000HID
+
+    class FakeGM3000(GM3000HID):
+        def __init__(self):
+            self.calls = 0
+
+        def transceive(self, apdu):
+            self.calls += 1
+            if self.calls == 1:
+                return b"12345678", 0x9000
+            return b"\x09\x00\x00\x00\x00", 0x0000
+
+    ok, retries = FakeGM3000().verify_pin("123456")
+    assert ok is True
+    assert retries == -1
+
+
+def test_gm3000_verify_pin_reads_head_retry_status():
+    """Verify GM3000 VerifyPIN reads 63Cx from response payload head."""
+    from bjca_service.longmai_gm3000 import GM3000HID
+
+    class FakeGM3000(GM3000HID):
+        def __init__(self):
+            self.calls = 0
+
+        def transceive(self, apdu):
+            self.calls += 1
+            if self.calls == 1:
+                return b"12345678", 0x9000
+            return bytes.fromhex("63c3000000"), 0x0000
+
+    ok, retries = FakeGM3000().verify_pin("123456")
+    assert ok is False
+    assert retries == 3
+
+
+def test_gm3000_pin_key_uses_sha1_padded_pin():
+    """Verify GM3000 PIN key matches the Linux/RK verified derivation."""
+    import hashlib
+    from bjca_service.longmai_gm3000 import GM3000HID
+
+    expected = hashlib.sha1(b"123456" + b"\x00" * 10).digest()[:16]
+    assert GM3000HID._lookup_pin_key("123456") == expected
+
+
 def test_sof_sign_requires_session_token():
     """Verify SOF signing requires the login token, not just global login state."""
     from bjca_service.api_handlers import APIHandler, _REQUEST_TOKEN

@@ -50,6 +50,7 @@ re-prepend 0x00 so the offsets above hold.
 from __future__ import annotations
 
 import logging
+import hashlib
 import struct
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -379,8 +380,21 @@ class GM3000HID:
         apdu = (bytes([0x80, 0x18, 0x00, 0x01, 0x00, 0x00, 0x12, 0x10, 0x00])
                 + pin_block)
         data, sw = self.transceive(apdu)
+        if len(data) >= 2:
+            sw_head = (data[0] << 8) | data[1]
+            if (sw_head & 0xFFF0) == SW_PIN_INCORRECT:
+                return False, sw_head & 0x0F
+        skf_codes = []
+        if len(data) >= 4:
+            skf_codes.append(int.from_bytes(data[:4], "little"))
+        if len(data) >= 5:
+            skf_codes.append(int.from_bytes(data[1:5], "little"))
         if sw == SW_OK:
             return True, -1
+        if sw == 0 and 0 in skf_codes:
+            return True, -1
+        if SAR_PIN_INCORRECT in skf_codes:
+            return False, data[4] if len(data) > 4 else -1
         if (sw & 0xFFF0) == SW_PIN_INCORRECT:
             return False, sw & 0x0F
         return False, -1
@@ -421,7 +435,7 @@ class GM3000HID:
           2) key + challenge message → 16-byte PIN block via SM4-ECB
 
         Message:  [challenge_len LE:2] [challenge:8] [0x80] [0x00*5]
-        Key:      SM3(pin) first 16 bytes
+        Key:      SHA1(PIN padded with NUL to at least 16 bytes) first 16 bytes.
         """
         try:
             from gmssl.sm4 import CryptSM4, SM4_ENCRYPT
@@ -443,11 +457,10 @@ class GM3000HID:
 
     @staticmethod
     def _lookup_pin_key(pin: str) -> bytes:
-        """Return the 16-byte device-specific PIN key."""
-        from gmssl import sm3 as _sm3
-
-        pin_hash = _sm3.sm3_hash(list(pin.encode("ascii")))
-        return bytes.fromhex(pin_hash)[:16]
+        """Return the 16-byte PIN key used by Longmai's GM3000 VerifyPIN."""
+        pin_bytes = pin.encode("ascii")
+        padded = pin_bytes + b"\x00" * max(0, 16 - len(pin_bytes))
+        return hashlib.sha1(padded).digest()[:16]
 
 
 def probe() -> Optional[DevInfo]:
