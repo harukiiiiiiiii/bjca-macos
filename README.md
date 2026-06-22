@@ -4,6 +4,8 @@
 提供交易平台浏览器侧所需的 HTTPS + WebSocket JSON-RPC 服务。无需 Windows、
 无需虚拟机、无需额外厂商驱动。
 
+当前只承诺支持龙脉 Longmai GM3000。其它厂商、其它型号或同厂不同固件可能无法使用。
+
 ## 快速开始
 
 ```bash
@@ -43,19 +45,25 @@ curl -sk -X POST https://127.0.0.1:21061/api \
 
 服务使用本机自签名证书。首次运行时会自动生成到
 `~/.bjca/certs/server.crt` 和 `~/.bjca/certs/server.key`。
-浏览器连接前可以信任此证书：
+浏览器连接前必须让 Chrome 接受这个本地自签名证书，否则交易页面无法建立
+`wss://127.0.0.1:21061/xtxapp` 连接。
 
-**方法 A — 信任证书（推荐）:**
+**方法 A - 信任证书（推荐）:**
 ```bash
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain ~/.bjca/certs/server.crt
 ```
 
-**方法 B — Chrome 允许不安全 localhost:**
+**方法 B - Chrome 允许不安全 localhost:**
 1. 打开 `chrome://flags/#allow-insecure-localhost`
 2. 设为 Enabled，重启 Chrome
 
-两种方法完成后，访问 `https://127.0.0.1:21061/health` 确认不再报证书错误，
+**方法 C - 手动访问一次本地服务:**
+1. 打开 `https://127.0.0.1:21061/health`
+2. 如果 Chrome 提示证书风险，点击高级选项并继续访问
+3. 看到 JSON 健康检查结果后，再刷新交易页面
+
+任选一种方法完成后，访问 `https://127.0.0.1:21061/health` 确认不再报证书错误，
 然后刷新证书登录页面即可。
 
 ## API
@@ -85,8 +93,21 @@ sudo security add-trusted-cert -d -r trustRoot \
 | 型号 | 厂商 | 传输 | 状态 |
 |------|------|------|------|
 | GM3000 | 龙脉 Longmai | HID | ✅ 完整支持 |
-| ePass2000/3000 | 飞天 Feitian | CCID | ⚠️ 需 PC/SC |
-| USK218 | 握奇 WatchData | CCID | ⚠️ 需 PKCS#11 |
+
+不承诺支持飞天、握奇、其它 CCID/PKCS#11 UKey，也不承诺支持非 GM3000 的龙脉设备。
+
+## GM3000 PIN 算法
+
+`v1.0.2` 起，GM3000 的 PIN block 使用 Linux/RK 端真机验证过的派生方式：
+
+```text
+SM4 key = SHA1(PIN + NUL padding 到至少 16 字节)[:16]
+plain   = uint16_le(8) || challenge8 || 0x80 || 0x00 * 5
+block   = SM4-ECB-Encrypt(SM4 key, plain)[:16]
+```
+
+旧版曾使用本机私有 `pin_keys.json` 映射或 `SM3(PIN)[:16]` fallback。公开版不再依赖
+`pin_keys.json`，也不会把任何个人 PIN 映射写入仓库或安装包。
 
 ## 项目结构
 
