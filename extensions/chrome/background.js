@@ -10,53 +10,7 @@
 
 const SERVICE_URL = 'https://127.0.0.1:21061';
 const API_URL = `${SERVICE_URL}/api`;
-const WS_URL = 'wss://127.0.0.1:21061/xtxapp';
-
-let wsConnection = null;
 let messageId = 0;
-let pendingRequests = new Map();
-
-// ---------------------------------------------------------------------------
-// WebSocket connection management
-// ---------------------------------------------------------------------------
-
-function connectWebSocket() {
-    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-        return;
-    }
-
-    wsConnection = new WebSocket(WS_URL);
-
-    wsConnection.onopen = () => {
-        console.log('[BJCA Bridge] WebSocket connected');
-    };
-
-    wsConnection.onmessage = (event) => {
-        const response = JSON.parse(event.data);
-        const id = response.id;
-
-        if (pendingRequests.has(id)) {
-            const { resolve } = pendingRequests.get(id);
-            pendingRequests.delete(id);
-
-            if (response.error) {
-                resolve({ error: response.error });
-            } else {
-                resolve({ result: response.result });
-            }
-        }
-    };
-
-    wsConnection.onclose = () => {
-        console.log('[BJCA Bridge] WebSocket disconnected, reconnecting...');
-        wsConnection = null;
-        setTimeout(connectWebSocket, 2000);
-    };
-
-    wsConnection.onerror = (err) => {
-        console.error('[BJCA Bridge] WebSocket error:', err);
-    };
-}
 
 // ---------------------------------------------------------------------------
 // API call — sends JSON-RPC request to the local service
@@ -65,28 +19,6 @@ function connectWebSocket() {
 async function callAPI(method, params = {}) {
     const id = ++messageId;
 
-    // Try WebSocket first
-    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
-        return new Promise((resolve) => {
-            pendingRequests.set(id, { resolve });
-            wsConnection.send(JSON.stringify({
-                jsonrpc: '2.0',
-                method: method,
-                params: params,
-                id: id,
-            }));
-
-            // Timeout after 30s
-            setTimeout(() => {
-                if (pendingRequests.has(id)) {
-                    pendingRequests.delete(id);
-                    resolve({ error: { code: -32000, message: 'Timeout' } });
-                }
-            }, 30000);
-        });
-    }
-
-    // Fallback to HTTP POST
     try {
         const response = await fetch(`${API_URL}`, {
             method: 'POST',
@@ -132,5 +64,4 @@ async function handleAPIRequest(request) {
 // Startup
 // ---------------------------------------------------------------------------
 
-connectWebSocket();
 console.log('[BJCA Bridge] Background service worker started');

@@ -17,6 +17,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
 
 _VENDOR_PATH = Path(__file__).resolve().parents[1] / "vendor"
 if _VENDOR_PATH.exists():
@@ -36,73 +38,39 @@ from .notifications import notify
 logger = logging.getLogger(__name__)
 
 
-SENSITIVE_METHODS = {
-    "SOF_Login",
-    "SOF_LoginEx",
-    "VerifyUserPIN",
+ALLOWED_ORIGIN_HOSTS = {
+    "jspec.com.cn",
+    "www.jspec.com.cn",
 }
-SENSITIVE_KEYS = {
-    "passwd",
-    "password",
-    "pin",
-    "token",
-}
-LONG_VALUE_KEYS = {
-    "cert",
-    "certificate",
-    "certdata",
-    "indata",
-    "message",
-    "pkcs7",
-    "ret_val",
-    "retvalue",
-    "retval",
-    "signature",
-    "signvalue",
-}
+ALLOWED_ORIGIN_SUFFIXES = (
+    ".sgcc.com.cn",
+)
 
 
-def _shorten_for_log(value: str, limit: int = 120) -> str:
-    """Keep logs useful without storing certificates, signatures, or tokens."""
-    if len(value) <= limit:
-        return value
-    prefix = value[:48]
-    suffix = value[-16:]
-    return f"{prefix}...{suffix}<len={len(value)}>"
-
-
-def _redact_for_log(data, method: str = ""):
-    """Return a log-safe copy of WebSocket data."""
-    def walk(value, key: str = "", index=None, parent_key: str = ""):
-        key_l = key.lower()
-        parent_l = parent_key.lower()
-
-        if key_l in SENSITIVE_KEYS:
-            return "***REDACTED***"
-        if method in SENSITIVE_METHODS and key in {"param_2", "PassWd"}:
-            return "***REDACTED***"
-        if method in SENSITIVE_METHODS and parent_l in {"param", "params"} and index == 1:
-            return "***REDACTED***"
-
-        if isinstance(value, dict):
-            return {k: walk(v, k, parent_key=key) for k, v in value.items()}
-        if isinstance(value, list):
-            return [walk(v, index=i, parent_key=key) for i, v in enumerate(value)]
-        if isinstance(value, str):
-            if key_l in LONG_VALUE_KEYS or len(value) > 180:
-                return _shorten_for_log(value)
-            return value
-        return value
-
-    return walk(data)
-
-
-def _log_json(label: str, data: dict, method: str = "") -> None:
-    logger.info(
-        "%s: %s",
-        label,
-        json.dumps(_redact_for_log(data, method), ensure_ascii=False),
+def _origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    parsed = urlparse(origin)
+    host = (parsed.hostname or "").lower()
+    return parsed.scheme == "https" and (
+        host in ALLOWED_ORIGIN_HOSTS
+        or any(host.endswith(suffix) for suffix in ALLOWED_ORIGIN_SUFFIXES)
     )
+
+
+def _log_ws(label: str, method: str, call_cmd_id: str = "", ok: Optional[bool] = None) -> None:
+    parts = [label, f"method={method or '-'}"]
+    if call_cmd_id:
+        parts.append(f"call_id={call_cmd_id}")
+    if ok is not None:
+        parts.append(f"ok={str(ok).lower()}")
+    logger.info(" ".join(parts))
+
+
+def _response_ok(response: dict) -> bool:
+    if "error" in response:
+        return False
+    return bool(response.get("retVal", response.get("retValue", True)))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -245,15 +213,18 @@ class WebSocketManager:
         This mirrors the websocket-handler in Apache's mod_websocket.c.
         Each message is a JSON-RPC request; each response is sent back.
         """
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
-
         # Verify localhost (mirrors the [mod_ajax] IP check)
         peer = request.transport.get_extra_info("peername")
         if peer and peer[0] != "127.0.0.1":
             logger.warning(f"Rejected non-localhost WebSocket from {peer[0]}")
-            await ws.close(code=4003, message=b"Localhost only")
-            return ws
+            raise web.HTTPForbidden(text="Localhost only")
+        origin = request.headers.get("Origin", "")
+        if not _origin_allowed(origin):
+            logger.warning("Rejected WebSocket origin: %s", origin or "<missing>")
+            raise web.HTTPForbidden(text="Forbidden origin")
+
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
 
         self._connections.add(ws)
         logger.info(
@@ -270,7 +241,7 @@ class WebSocketManager:
 
                         # Bridge website protocol → JSON-RPC.
                         method = request_data.get("xtx_func_name") or request_data.get("func") or request_data.get("method") or ""
-                        _log_json("WS RECV", request_data, method)
+                        _log_ws("WS RECV", method, call_cmd_id)
                         if method:
                             request_data["method"] = method
                         request_data["params"] = request_data.get("param", request_data.get("params", {}))
@@ -287,7 +258,7 @@ class WebSocketManager:
                         else:
                             inner = jrpc_response.get("result", {})
                             wire_response.update(inner)
-                        _log_json("WS SEND", wire_response, method)
+                        _log_ws("WS SEND", method, call_cmd_id, _response_ok(wire_response))
                         await ws.send_json(wire_response)
                     except json.JSONDecodeError:
                         logger.warning("WS non-JSON: %s", msg.data[:200])
@@ -359,7 +330,12 @@ def create_app(config: ServiceConfig = None) -> web.Application:
 
     # CORS setup — allow local browser access
     cors = aiohttp_cors.setup(app, defaults={
-        "*": aiohttp_cors.ResourceOptions(
+        "https://jspec.com.cn": aiohttp_cors.ResourceOptions(
+            allow_credentials=True,
+            expose_headers="*",
+            allow_headers="*",
+        ),
+        "https://www.jspec.com.cn": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
             expose_headers="*",
             allow_headers="*",

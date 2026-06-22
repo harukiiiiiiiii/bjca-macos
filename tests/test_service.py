@@ -228,24 +228,97 @@ def test_sof_sm2_cms_signed_data_structure():
     assert signer_info["signature_algorithm"]["algorithm"].dotted == "1.2.156.10197.1.501"
 
 
-def test_websocket_log_redaction():
-    """Verify WebSocket logs redact PINs, tokens, and long payloads."""
-    from bjca_service.server import _redact_for_log
+def test_websocket_log_summary_does_not_include_payload():
+    """Verify WebSocket logs never include request/response payload values."""
+    import logging
+    from bjca_service import server
 
-    redacted = _redact_for_log({
-        "xtx_func_name": "SOF_LoginEx",
-        "param_1": "cert-id",
-        "param_2": "secret-pin",
-        "param": ["cert-id", "secret-pin", 0],
-        "token": "secret-token",
-        "Cert": "A" * 300,
-    }, "SOF_LoginEx")
+    records = []
 
-    text = json.dumps(redacted)
-    assert "secret-pin" not in text
-    assert "secret-token" not in text
-    assert "***REDACTED***" in text
-    assert "<len=300>" in text
+    class Handler(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Handler()
+    old_level = server.logger.level
+    server.logger.setLevel(logging.INFO)
+    server.logger.addHandler(handler)
+    try:
+        server._log_ws("WS RECV", "SOF_LoginEx", "i_1")
+        server._log_ws("WS SEND", "SOF_LoginEx", "i_1", True)
+    finally:
+        server.logger.removeHandler(handler)
+        server.logger.setLevel(old_level)
+
+    text = "\n".join(records)
+    assert "SOF_LoginEx" in text
+    assert "secret" not in text
+    assert "cert" not in text
+    assert "token" not in text
+
+
+def test_origin_allowed():
+    """Verify WebSocket Origin allowlist is exact."""
+    from bjca_service.server import _origin_allowed
+
+    assert _origin_allowed("https://www.jspec.com.cn")
+    assert _origin_allowed("https://jspec.com.cn")
+    assert _origin_allowed("https://foo.sgcc.com.cn")
+    assert _origin_allowed("https://a.b.sgcc.com.cn")
+    assert not _origin_allowed("")
+    assert not _origin_allowed("null")
+    assert not _origin_allowed("http://www.jspec.com.cn")
+    assert not _origin_allowed("https://evil.example")
+    assert not _origin_allowed("https://sgcc.com.cn.evil.example")
+
+
+def test_sof_login_does_not_cache_plain_pin():
+    """Verify successful SOF login stores state, not the plaintext PIN."""
+    import asyncio
+    from bjca_service.api_handlers import APIHandler
+
+    class FakeGM3000:
+        def verify_pin(self, pin):
+            return pin == "123456", 8
+
+    class FakeDeviceManager:
+        gm3000 = FakeGM3000()
+
+    async def run():
+        handler = APIHandler()
+        handler._dev = FakeDeviceManager()
+        result = await handler.sof_login(["cert-id", "123456", 0])
+        assert result["retVal"] is True
+        assert handler._logged_in is True
+        assert not hasattr(handler, "_last_pin")
+
+    asyncio.run(run())
+
+
+def test_sof_sign_requires_session_token():
+    """Verify SOF signing requires the login token, not just global login state."""
+    from bjca_service.api_handlers import APIHandler, _REQUEST_TOKEN
+
+    class FakeGM3000:
+        def ecc_sign(self, digest):
+            return b"\x01" * 64
+
+    class FakeDeviceManager:
+        gm3000 = FakeGM3000()
+        gm3000_cert = b"cert"
+
+    handler = APIHandler()
+    handler._dev = FakeDeviceManager()
+    handler._logged_in = True
+    handler._session_token = "token-1"
+    handler._sm2_message_digest = lambda data, cert: b"\x02" * 32
+
+    assert handler._sign_sof_text("data") == ""
+    ctx = _REQUEST_TOKEN.set("token-1")
+    try:
+        assert handler._sign_sof_text("data")
+    finally:
+        _REQUEST_TOKEN.reset(ctx)
 
 
 def test_device_presence_snapshot_helper():

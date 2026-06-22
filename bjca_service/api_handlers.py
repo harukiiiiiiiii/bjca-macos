@@ -29,6 +29,7 @@ Response:
 """
 
 import base64
+import contextvars
 from datetime import datetime
 import json
 import logging
@@ -49,6 +50,7 @@ from .crypto_ops import (
 from .pkcs11_bridge import PKCS11Bridge, get_bridge
 
 logger = logging.getLogger(__name__)
+_REQUEST_TOKEN = contextvars.ContextVar("request_token", default="")
 
 
 class APIError(Exception):
@@ -70,7 +72,8 @@ class APIHandler:
         self._dev = get_device_manager()
         self._cert = get_cert_manager()
         self._pkcs11 = get_bridge()
-        self._last_pin: Optional[str] = None
+        self._logged_in: bool = False
+        self._session_token: str = ""
         self._last_cert_id: str = ""
         self._last_pin_retries: int = -1
 
@@ -87,6 +90,10 @@ class APIHandler:
         method = request_data.get("method", "")
         params = request_data.get("params", {})
         req_id = request_data.get("id", 0)
+        request_token = request_data.get("token", "")
+        if not request_token and isinstance(params, dict):
+            request_token = params.get("token", "")
+        token_context = _REQUEST_TOKEN.set(str(request_token or ""))
 
         try:
             handler = self._get_handler(method)
@@ -105,6 +112,8 @@ class APIHandler:
         except Exception as e:
             logger.exception(f"API handler error in {method}: {e}")
             return self._error(req_id, -32603, str(e))
+        finally:
+            _REQUEST_TOKEN.reset(token_context)
 
     # ------------------------------------------------------------------
     # Health Check (mirrors mod_health.c → /health)
@@ -666,23 +675,27 @@ class APIHandler:
             ok, retries = False, -1
         self._last_pin_retries = retries
         if ok:
-            self._last_pin = pin
+            self._logged_in = True
+            self._session_token = secrets.token_hex(16)
             self._last_cert_id = cert_id or self._last_cert_id
             return {
                 "retVal": True,
                 "retValue": True,
-                "token": secrets.token_hex(16),
+                "token": self._session_token,
             }
+        self._logged_in = False
+        self._session_token = ""
         return {"retVal": False, "retValue": False}
 
     async def sof_logout(self, params: dict = None) -> dict:
         """SOF_Logout — clear cached login state."""
-        self._last_pin = None
+        self._logged_in = False
+        self._session_token = ""
         return {"retVal": True, "retValue": True}
 
     async def sof_is_login(self, params: dict = None) -> dict:
         """SOF_IsLogin — report whether a PIN was verified in this session."""
-        return {"retVal": bool(self._last_pin), "retValue": bool(self._last_pin)}
+        return {"retVal": self._logged_in, "retValue": self._logged_in}
 
     async def sof_get_pin_retry_count(self, params: dict = None) -> dict:
         """SOF_GetPinRetryCount — return the last known retry count."""
@@ -692,7 +705,8 @@ class APIHandler:
     async def sof_sign_data(self, params: dict = None) -> dict:
         """SOF_SignData/SignedData — sign text and return raw SM2 signature."""
         data = self._param(params, 1, "InData", "")
-        ret_val = self._sign_sof_text(str(data or ""))
+        pin = str(self._param(params, 3, "PassWd", "") or "")
+        ret_val = self._sign_sof_text(str(data or ""), pin)
         return {"retVal": ret_val, "retValue": ret_val}
 
     async def sof_sign_message(self, params: dict = None) -> dict:
@@ -702,7 +716,8 @@ class APIHandler:
             flag = int(self._param(params, 0, "dwFlag", 0) or 0)
         except (TypeError, ValueError):
             flag = 0
-        ret_val = self._sign_sof_message(str(data or ""), detached=bool(flag))
+        pin = str(self._param(params, 3, "PassWd", "") or "")
+        ret_val = self._sign_sof_message(str(data or ""), detached=bool(flag), pin=pin)
         return {"retVal": ret_val, "retValue": ret_val}
 
     async def sof_gen_random(self, params: dict = None) -> dict:
@@ -921,6 +936,15 @@ class APIHandler:
                 return sn
         return ""
 
+    def _token_valid(self) -> bool:
+        token = _REQUEST_TOKEN.get()
+        return bool(
+            self._logged_in
+            and self._session_token
+            and token
+            and secrets.compare_digest(token, self._session_token)
+        )
+
     @staticmethod
     def _sof_time(value: str) -> str:
         try:
@@ -929,22 +953,23 @@ class APIHandler:
         except Exception:
             return ""
 
-    def _sign_sof_text(self, text: str) -> str:
-        if not self._last_pin:
+    def _sign_sof_text(self, text: str, pin: str = "") -> str:
+        if not self._token_valid():
             logger.warning("SOF signing requested before successful login")
             return ""
         gm = self._dev.gm3000
-        if gm is None:
-            self._dev.init_device(0, self._last_pin)
+        if gm is None and pin:
+            self._dev.init_device(0, pin)
             gm = self._dev.gm3000
         if gm is None:
             return ""
         try:
-            ok, retries = gm.verify_pin(self._last_pin)
-            self._last_pin_retries = retries
-            if not ok:
-                self._last_pin = None
-                return ""
+            if pin:
+                ok, retries = gm.verify_pin(pin)
+                self._last_pin_retries = retries
+                if not ok:
+                    self._logged_in = False
+                    return ""
             data = text.encode("utf-8")
             digest = self._sm2_message_digest(data, self._dev.gm3000_cert)
             signature = gm.ecc_sign(digest)
@@ -953,24 +978,25 @@ class APIHandler:
             logger.warning("SOF signing failed: %s", e)
             return ""
 
-    def _sign_sof_message(self, text: str, detached: bool = False) -> str:
+    def _sign_sof_message(self, text: str, detached: bool = False, pin: str = "") -> str:
         """Create a BJCA-compatible PKCS#7/CMS SignedData value."""
-        if not self._last_pin:
+        if not self._token_valid():
             logger.warning("SOF signing requested before successful login")
             return ""
         gm = self._dev.gm3000
-        if gm is None:
-            self._dev.init_device(0, self._last_pin)
+        if gm is None and pin:
+            self._dev.init_device(0, pin)
             gm = self._dev.gm3000
         if gm is None or not self._dev.gm3000_cert:
             return ""
 
         try:
-            ok, retries = gm.verify_pin(self._last_pin)
-            self._last_pin_retries = retries
-            if not ok:
-                self._last_pin = None
-                return ""
+            if pin:
+                ok, retries = gm.verify_pin(pin)
+                self._last_pin_retries = retries
+                if not ok:
+                    self._logged_in = False
+                    return ""
 
             content = text.encode("utf-8")
             digest = self._sm2_message_digest(content, self._dev.gm3000_cert)

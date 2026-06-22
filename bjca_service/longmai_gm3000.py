@@ -50,8 +50,6 @@ re-prepend 0x00 so the offsets above hold.
 from __future__ import annotations
 
 import logging
-import json
-import os
 import struct
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -423,9 +421,7 @@ class GM3000HID:
           2) key + challenge message → 16-byte PIN block via SM4-ECB
 
         Message:  [challenge_len LE:2] [challenge:8] [0x80] [0x00*5]
-        Key:      derive_pin_key(pin)  (16 bytes, device-specific)
-
-        PIN-specific device keys can be supplied from a local, untracked map.
+        Key:      SM3(pin) first 16 bytes
         """
         try:
             from gmssl.sm4 import CryptSM4, SM4_ENCRYPT
@@ -439,8 +435,6 @@ class GM3000HID:
         msg[2:2 + len(challenge)] = challenge
         msg[2 + len(challenge)] = 0x80
 
-        # PIN-derived SM4 key. Local deployments can provide a per-token mapping;
-        # other PINs use the fallback derivation below.
         key = GM3000HID._lookup_pin_key(pin)
 
         sm4 = CryptSM4()
@@ -453,42 +447,7 @@ class GM3000HID:
         from gmssl import sm3 as _sm3
 
         pin_hash = _sm3.sm3_hash(list(pin.encode("ascii")))
-        known_by_hash = GM3000HID._load_pin_key_map()
-        if pin_hash in known_by_hash:
-            return bytes.fromhex(known_by_hash[pin_hash])
-        # Fallback: derive a placeholder — the real algorithm is device-specific.
         return bytes.fromhex(pin_hash)[:16]
-
-    @staticmethod
-    def _load_pin_key_map() -> dict[str, str]:
-        """
-        Load optional local PIN-hash to SM4-key mappings.
-
-        The map must stay outside the repository because entries are specific to
-        a user's token and PIN. BJCA_PIN_KEY_MAP can point to an alternate JSON
-        file; otherwise ~/.bjca/pin_keys.json is used when present.
-        """
-        paths = []
-        env_path = os.environ.get("BJCA_PIN_KEY_MAP")
-        if env_path:
-            paths.append(env_path)
-        paths.append(os.path.expanduser("~/.bjca/pin_keys.json"))
-
-        for path in paths:
-            if not path or not os.path.exists(path):
-                continue
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                if isinstance(data, dict):
-                    return {
-                        str(k).lower(): str(v)
-                        for k, v in data.items()
-                        if isinstance(v, str) and len(v) == 32
-                    }
-            except Exception as e:
-                logger.debug("failed to load PIN key map %s: %s", path, e)
-        return {}
 
 
 def probe() -> Optional[DevInfo]:
