@@ -45,6 +45,7 @@ ALLOWED_ORIGIN_HOSTS = {
 ALLOWED_ORIGIN_SUFFIXES = (
     ".sgcc.com.cn",
 )
+WEBSOCKET_PROTOCOLS = ("cryptokit-kdets-protocol",)
 
 
 def _origin_allowed(origin: str) -> bool:
@@ -223,7 +224,7 @@ class WebSocketManager:
             logger.warning("Rejected WebSocket origin: %s", origin or "<missing>")
             raise web.HTTPForbidden(text="Forbidden origin")
 
-        ws = web.WebSocketResponse()
+        ws = web.WebSocketResponse(protocols=WEBSOCKET_PROTOCOLS)
         await ws.prepare(request)
 
         self._connections.add(ws)
@@ -532,7 +533,7 @@ def main():
 
     # Setup logging
     setup_logging(config)
-    logger.info(f"Starting BJCA Certificate Environment Service v1.0.0")
+    logger.info("Starting BJCA Certificate Environment Service v2.1.0")
     logger.info(f"  Listening on: {config.listen_host}:{config.listen_port}")
     logger.info(f"  WebSocket: wss://{config.listen_host}:{config.listen_port}/xtxapp")
     logger.info(f"  Health: http://{config.listen_host}:{config.listen_port}/health")

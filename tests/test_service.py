@@ -142,6 +142,27 @@ def test_api_handler_list_devices():
     asyncio.run(run())
 
 
+def test_list_certificates_initializes_gm3000_before_listing():
+    """Certificate listing must initialize a cold GM3000 session."""
+    import asyncio
+    from types import SimpleNamespace
+    from bjca_service.api_handlers import APIHandler
+
+    class FakeCert:
+        def to_dict(self):
+            return {"subject": "CN=Test"}
+
+    async def run():
+        handler = APIHandler()
+        handler._current_cert_info = lambda: FakeCert()
+        handler._dev = SimpleNamespace(gm3000=None, gm3000_cert=None)
+        handler._pkcs11 = SimpleNamespace(is_available=False, _session=None)
+        result = await handler.list_certificates()
+        assert result == {"count": 1, "certificates": [{"subject": "CN=Test"}]}
+
+    asyncio.run(run())
+
+
 def test_jsonrpc_dispatcher():
     """Verify JSON-RPC request dispatching."""
     import asyncio
@@ -270,6 +291,13 @@ def test_origin_allowed():
     assert not _origin_allowed("http://www.jspec.com.cn")
     assert not _origin_allowed("https://evil.example")
     assert not _origin_allowed("https://sgcc.com.cn.evil.example")
+
+
+def test_websocket_supports_trading_center_protocol():
+    """The Jiangsu client requires its WebSocket subprotocol to be echoed."""
+    from bjca_service.server import WEBSOCKET_PROTOCOLS
+
+    assert "cryptokit-kdets-protocol" in WEBSOCKET_PROTOCOLS
 
 
 def test_sof_login_does_not_cache_plain_pin():

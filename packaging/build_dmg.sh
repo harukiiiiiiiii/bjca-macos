@@ -9,10 +9,10 @@ STAGE_DIR="$BUILD_DIR/stage"
 PAYLOAD_DIR="$BUILD_DIR/payload"
 SCRIPTS_DIR="$BUILD_DIR/scripts"
 DIST_DIR="$ROOT_DIR/dist"
-PKG_ID="org.bjca-macos.ukey-service"
+PKG_ID="cn.com.jspec.bjca-macos"
 PKG_NAME="BJCA-UKey-Service.pkg"
 DMG_NAME="BJCA-UKey-Service.dmg"
-VERSION="1.0.0"
+VERSION="2.1.0"
 
 SITE_PACKAGES="$(python3 - <<'PY'
 import site
@@ -30,11 +30,34 @@ mkdir -p "$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/config"
 install -m 0644 "$ROOT_DIR/config/client_setup.ini" "$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/config/client_setup.ini"
 install -m 0644 "$ROOT_DIR/requirements.txt" "$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/requirements.txt"
 install -m 0644 "$ROOT_DIR/README.md" "$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/README.md"
+ditto --norsrc --noextattr "$ROOT_DIR/extensions/chrome" "$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/Chrome-Extension"
 
 echo "Copying Python vendor dependencies..."
 VENDOR="$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/vendor"
 mkdir -p "$VENDOR"
 python3 "$ROOT_DIR/packaging/copy_vendor.py" "$SITE_PACKAGES" "$VENDOR"
+
+cat > "$SCRIPTS_DIR/preinstall" <<'SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+TARGET_USER="$(stat -f %Su /dev/console)"
+USER_HOME="$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory | awk '{print $2}')"
+USER_ID="$(id -u "$TARGET_USER")"
+PLIST="$USER_HOME/Library/LaunchAgents/com.bjca.certservice.plist"
+
+launchctl bootout "gui/$USER_ID" "$PLIST" >/dev/null 2>&1 || true
+rm -rf "$USER_HOME/.bjca/runtime" "$USER_HOME/.bjca/pycache"
+rm -f "$PLIST"
+rm -rf "/Library/Application Support/BJCA-UKey-Service"
+rm -rf "/Users/Shared/BJCA-Chrome-Extension"
+
+pkgutil --forget org.bjca-macos.ukey-service >/dev/null 2>&1 || true
+pkgutil --forget cn.com.jspec.bjca-macos >/dev/null 2>&1 || true
+
+exit 0
+SCRIPT
+chmod +x "$SCRIPTS_DIR/preinstall"
 
 cat > "$SCRIPTS_DIR/postinstall" <<'SCRIPT'
 #!/bin/bash
@@ -58,13 +81,15 @@ BIN_DIR="$RUN_DIR/bin"
 LAUNCHER="$BIN_DIR/BJCA-UKey-Service"
 LAUNCH_AGENTS="$USER_HOME/Library/LaunchAgents"
 PLIST="$LAUNCH_AGENTS/com.bjca.certservice.plist"
+SHARED_EXTENSION="/Users/Shared/BJCA-Chrome-Extension"
 
-mkdir -p "$RUN_DIR" "$LOG_DIR" "$PYCACHE_DIR" "$BIN_DIR" "$LAUNCH_AGENTS"
+mkdir -p "$RUN_DIR" "$LOG_DIR" "$PYCACHE_DIR" "$BIN_DIR" "$LAUNCH_AGENTS" "$SHARED_EXTENSION"
 ditto --norsrc --noextattr "$APP_SRC/bjca_service" "$RUN_DIR/bjca_service"
 ditto --norsrc --noextattr "$APP_SRC/config" "$RUN_DIR/config"
 ditto --norsrc --noextattr "$APP_SRC/vendor" "$RUN_DIR/vendor"
 install -m 0644 "$APP_SRC/requirements.txt" "$RUN_DIR/requirements.txt"
 install -m 0644 "$APP_SRC/README.md" "$RUN_DIR/README.md"
+ditto --norsrc --noextattr "$APP_SRC/Chrome-Extension" "$SHARED_EXTENSION"
 
 cat > "$LAUNCHER" <<'LAUNCHER'
 #!/bin/bash
@@ -127,7 +152,7 @@ cat > "$PLIST" <<PLIST
 </plist>
 PLIST
 
-chown -R "$TARGET_USER":staff "$USER_HOME/.bjca" "$PLIST"
+chown -R "$TARGET_USER":staff "$USER_HOME/.bjca" "$PLIST" "$SHARED_EXTENSION"
 chmod 644 "$PLIST"
 
 launchctl bootout "gui/$USER_ID" "$PLIST" >/dev/null 2>&1 || true
@@ -179,15 +204,22 @@ mv "$DIST_DIR/$PKG_NAME.clean" "$DIST_DIR/$PKG_NAME"
 echo "Building DMG..."
 mkdir -p "$STAGE_DIR/dmg"
 install -m 0644 "$DIST_DIR/$PKG_NAME" "$STAGE_DIR/dmg/$PKG_NAME"
+ditto --norsrc --noextattr "$ROOT_DIR/extensions/chrome" "$STAGE_DIR/dmg/Chrome-Extension"
+install -m 0644 "$ROOT_DIR/docs/BJCA-UKey-Service-安装指南.md" "$STAGE_DIR/dmg/安装指南.md"
 cat > "$STAGE_DIR/dmg/README-安装说明.txt" <<'TXT'
 BJCA UKey Service 安装说明
 
-1. 双击 BJCA-UKey-Service.pkg 安装。
-2. 安装完成后，本地服务会自动启动。
+1. 双击 BJCA-UKey-Service.pkg 安装；已安装 2.0 时会自动覆盖升级。
+2. 安装完成后，本地服务会自动启动，原有本地证书会保留。
 3. 服务地址：https://127.0.0.1:21061
 4. 健康检查：https://127.0.0.1:21061/health
 5. 插入或拔出已支持的 UKey 后，系统会弹出“UKey 已插入 / UKey 已拔出”通知。
 6. macOS 后台项目中会显示为 BJCA UKey Service。
+7. Chrome 打开 chrome://extensions，启用“开发者模式”。
+8. 点击“加载已解压的扩展程序”，选择 /Users/Shared/BJCA-Chrome-Extension。
+9. 重新打开交易平台证书登录页。
+
+详细步骤请看同目录的“安装指南.md”。
 
 已验证：Longmai GM3000 / 兼容证书登录页面。
 TXT

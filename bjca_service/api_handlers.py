@@ -124,7 +124,7 @@ class APIHandler:
         config = get_config()
         return {
             "status": "ok",
-            "version": "1.0.0",
+            "version": "2.1.0",
             "service": "BJCA Certificate Environment (macOS)",
             "timestamp": __import__("time").strftime(
                 "%Y-%m-%dT%H:%M:%SZ",
@@ -191,10 +191,11 @@ class APIHandler:
         Uses the native GM3000 driver when available.
         """
         cert_list = []
-        gm = self._dev.gm3000
-        if gm is not None and self._dev.gm3000_cert:
-            cert_list.append(self._cert.parse_certificate(
-                self._dev.gm3000_cert).to_dict())
+        # A fresh service has only detected the HID device; initialize it before
+        # reporting certificates so the browser can proceed to PIN login.
+        cert_info = self._current_cert_info()
+        if cert_info is not None:
+            cert_list.append(cert_info.to_dict())
         elif self._pkcs11.is_available and self._pkcs11._session:
             certs = self._pkcs11.list_certificates()
             cert_list = [c.to_dict() for c in certs]
@@ -782,7 +783,7 @@ class APIHandler:
 
     async def sof_get_version(self, params: dict = None) -> dict:
         """SOF_GetVersion/SOF_GetProductVersion."""
-        return {"retVal": "BJCA-macOS-1.0.0", "retValue": "BJCA-macOS-1.0.0"}
+        return {"retVal": "BJCA-macOS-2.1.0", "retValue": "BJCA-macOS-2.1.0"}
 
     async def sof_get_last_error(self, params: dict = None) -> dict:
         """SOF_GetLastError/SOF_GetLastErrMsg."""
