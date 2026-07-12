@@ -24,5 +24,5 @@ Architecture:
   └─────────────────────────────────┘
 """
 
-__version__ = "1.0.0"
+__version__ = "2.1.0"
 __author__ = "BJCA macOS Port"

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BJCA Certificate Bridge (macOS)",
-  "version": "1.0.0",
+  "version": "2.1.0",
   "description": "Replaces the Windows ActiveX control with native macOS WebSocket bridge for BJCA USB Key operations.",
   "permissions": [
     "nativeMessaging",
@@ -24,14 +24,20 @@
         "https://www.jspec.com.cn/*",
         "https://*.sgcc.com.cn/*"
       ],
+      "js": ["page-bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://jspec.com.cn/*",
+        "https://www.jspec.com.cn/*",
+        "https://*.sgcc.com.cn/*"
+      ],
       "js": ["inject.js"],
       "run_at": "document_start",
       "all_frames": true
     }
-  ],
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  }
+  ]
 }
