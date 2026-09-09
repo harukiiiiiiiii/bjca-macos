@@ -13,7 +13,13 @@ import os
 import configparser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
+
+
+def _default_public_files(base: Path) -> Dict[str, str]:
+    preferred = base / "config" / "client_setup.ini"
+    target = preferred if preferred.exists() else base / "client_setup.ini"
+    return {"client_setup.ini": str(target)}
 
 
 @dataclass
@@ -25,6 +31,11 @@ class ServiceConfig:
     listen_port: int = 21061
     websocket_path: str = "/xtxapp"
     api_prefix: str = "/api"
+    public_files: Dict[str, str] = field(
+        default_factory=lambda: _default_public_files(
+            Path(__file__).resolve().parents[1]
+        )
+    )
 
     # --- Update configuration (mirrors [update] section) ---
     install_online_update: bool = True

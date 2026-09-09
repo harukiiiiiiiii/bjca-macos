@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import signal
 import sys
 from datetime import datetime, timedelta, timezone
@@ -34,29 +35,17 @@ from cryptography.x509.oid import NameOID
 from .api_handlers import APIHandler, get_handler, APIError
 from .config import ServiceConfig, get_config, set_config
 from .notifications import notify
+from .security import origin_allowed, resolve_public_file, PublicFileError
 
 logger = logging.getLogger(__name__)
 
 
-ALLOWED_ORIGIN_HOSTS = {
-    "jspec.com.cn",
-    "www.jspec.com.cn",
-}
-ALLOWED_ORIGIN_SUFFIXES = (
-    ".sgcc.com.cn",
-)
 WEBSOCKET_PROTOCOLS = ("cryptokit-kdets-protocol",)
 
 
 def _origin_allowed(origin: str) -> bool:
-    if not origin:
-        return False
-    parsed = urlparse(origin)
-    host = (parsed.hostname or "").lower()
-    return parsed.scheme == "https" and (
-        host in ALLOWED_ORIGIN_HOSTS
-        or any(host.endswith(suffix) for suffix in ALLOWED_ORIGIN_SUFFIXES)
-    )
+    """HTTPS-only allowed origin helper for WebSocket and strict checks."""
+    return origin_allowed(origin, allow_extension=False)
 
 
 def _log_ws(label: str, method: str, call_cmd_id: str = "", ok: Optional[bool] = None) -> None:
@@ -153,6 +142,15 @@ class ServerHandlers:
           POST /api            → Dispatch to method in request body
           POST /api/<method>   → Use URL path as method name
         """
+        content_type = request.content_type.lower()
+        if content_type != "application/json":
+            return web.json_response(
+                {"jsonrpc": "2.0", "error": {
+                    "code": -32700, "message": "Unsupported Media Type: expected application/json"
+                }, "id": 0},
+                status=415,
+            )
+
         try:
             body = await request.json()
         except Exception:
@@ -163,33 +161,55 @@ class ServerHandlers:
                 status=400,
             )
 
+        if not isinstance(body, dict):
+            return web.json_response(
+                {"jsonrpc": "2.0", "error": {
+                    "code": -32600, "message": "Invalid Request: request body must be a JSON object"
+                }, "id": 0},
+                status=400,
+            )
+
         # URL path can override the method
         path_method = request.match_info.get("method", "")
         if path_method:
             body["method"] = path_method
+
+        method = body.get("method")
+        if not isinstance(method, str) or not method.strip():
+            return web.json_response(
+                {"jsonrpc": "2.0", "error": {
+                    "code": -32600, "message": "Invalid Request: method must be a nonempty string"
+                }, "id": body.get("id", 0)},
+                status=400,
+            )
+
+        if "params" in body:
+            params = body["params"]
+            if params is None or not isinstance(params, (dict, list)):
+                return web.json_response(
+                    {"jsonrpc": "2.0", "error": {
+                        "code": -32600, "message": "Invalid Request: params must be a dict or list"
+                    }, "id": body.get("id", 0)},
+                    status=400,
+                )
 
         result = await self._api.handle_request(body)
         return web.json_response(result)
 
     # ---- Static File Serving (config data, PKI certs) ----
 
-    async def static_file(self, request: web.Request) -> web.Response:
+    async def static_file(self, request: web.Request) -> web.StreamResponse:
         """Serve static configuration/data files."""
-        filename = request.match_info.get("filename", "index.html")
+        filename = request.match_info.get("filename", "")
         config = get_config()
 
-        # Search in data directories
-        search_paths = [
-            Path(config.cert_data_path) / filename,
-            Path(config.bjca_root) / "data" / filename,
-            Path("./config") / filename,
-        ]
+        try:
+            resolved_path = resolve_public_file(filename, config.public_files)
+        except PublicFileError as exc:
+            logger.debug("Rejected public file request %r: %s", filename, exc)
+            return web.Response(text="Not found", status=404)
 
-        for path in search_paths:
-            if path.exists():
-                return web.FileResponse(path)
-
-        return web.Response(text="Not found", status=404)
+        return web.FileResponse(resolved_path)
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +235,8 @@ class WebSocketManager:
         Each message is a JSON-RPC request; each response is sent back.
         """
         # Verify localhost (mirrors the [mod_ajax] IP check)
-        peer = request.transport.get_extra_info("peername")
+        transport = request.transport
+        peer = transport.get_extra_info("peername") if transport is not None else None
         if peer and peer[0] != "127.0.0.1":
             logger.warning(f"Rejected non-localhost WebSocket from {peer[0]}")
             raise web.HTTPForbidden(text="Localhost only")
@@ -227,10 +248,11 @@ class WebSocketManager:
         ws = web.WebSocketResponse(protocols=WEBSOCKET_PROTOCOLS)
         await ws.prepare(request)
 
+        connection_id = secrets.token_hex(16)
         self._connections.add(ws)
         logger.info(
-            f"WebSocket connected from {peer[0]}:{peer[1]}"
-            if peer else "WebSocket connected"
+            f"WebSocket connected from {peer[0]}:{peer[1]} (id={connection_id})"
+            if peer else f"WebSocket connected (id={connection_id})"
         )
 
         try:
@@ -238,17 +260,75 @@ class WebSocketManager:
                 if msg.type == WSMsgType.TEXT:
                     try:
                         request_data = json.loads(msg.data)
+                    except json.JSONDecodeError:
+                        await ws.send_json({
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32700, "message": "Parse error"},
+                            "id": 0,
+                        })
+                        continue
+
+                    if not isinstance(request_data, dict):
+                        await ws.send_json({
+                            "jsonrpc": "2.0",
+                            "error": {
+                                "code": -32600,
+                                "message": "Invalid Request: request must be a JSON object",
+                            },
+                            "id": 0,
+                        })
+                        continue
+
+                    try:
                         call_cmd_id = request_data.get("call_cmd_id", "")
 
                         # Bridge website protocol → JSON-RPC.
-                        method = request_data.get("xtx_func_name") or request_data.get("func") or request_data.get("method") or ""
+                        method = (
+                            request_data.get("xtx_func_name")
+                            or request_data.get("func")
+                            or request_data.get("method")
+                            or ""
+                        )
                         _log_ws("WS RECV", method, call_cmd_id)
-                        if method:
-                            request_data["method"] = method
-                        request_data["params"] = request_data.get("param", request_data.get("params", {}))
-                        request_data["id"] = request_data.get("call_cmd_id", 1)
 
-                        jrpc_response = await self._api.handle_request(request_data)
+                        if not isinstance(method, str) or not method.strip():
+                            await ws.send_json({
+                                "jsonrpc": "2.0",
+                                "error": {
+                                    "code": -32600,
+                                    "message": "Invalid Request: method must be a nonempty string",
+                                },
+                                "id": call_cmd_id or 0,
+                            })
+                            continue
+
+                        request_data["method"] = method
+
+                        # Params may be array or dict under 'param' or 'params'
+                        if "param" in request_data:
+                            params = request_data["param"]
+                        elif "params" in request_data:
+                            params = request_data["params"]
+                        else:
+                            params = {}
+
+                        if not isinstance(params, (dict, list)):
+                            await ws.send_json({
+                                "jsonrpc": "2.0",
+                                "error": {
+                                    "code": -32600,
+                                    "message": "Invalid Request: params must be a dict or list",
+                                },
+                                "id": call_cmd_id or 0,
+                            })
+                            continue
+
+                        request_data["params"] = params
+                        request_data["id"] = call_cmd_id or 1
+
+                        jrpc_response = await self._api.handle_request(
+                            request_data, connection_id=connection_id
+                        )
 
                         # Rewrite to BJCA wire format.
                         # The browser protocol embeds result fields at the top
@@ -261,14 +341,6 @@ class WebSocketManager:
                             wire_response.update(inner)
                         _log_ws("WS SEND", method, call_cmd_id, _response_ok(wire_response))
                         await ws.send_json(wire_response)
-                    except json.JSONDecodeError:
-                        logger.warning("WS non-JSON: %s", msg.data[:200])
-                    except json.JSONDecodeError:
-                        await ws.send_json({
-                            "jsonrpc": "2.0",
-                            "error": {"code": -32700, "message": "Parse error"},
-                            "id": 0,
-                        })
                     except Exception as e:
                         logger.exception("WebSocket handler error")
                         await ws.send_json({
@@ -277,7 +349,7 @@ class WebSocketManager:
                                 "code": -32603,
                                 "message": str(e),
                             },
-                            "id": 0,
+                            "id": request_data.get("call_cmd_id", 0) if isinstance(request_data, dict) else 0,
                         })
 
                 elif msg.type == WSMsgType.ERROR:
@@ -287,7 +359,9 @@ class WebSocketManager:
             pass
         finally:
             self._connections.discard(ws)
-            logger.info("WebSocket disconnected")
+            if hasattr(self._api, "_cleanup_connection"):
+                self._api._cleanup_connection(connection_id)
+            logger.info(f"WebSocket disconnected (id={connection_id})")
 
         return ws
 
@@ -302,11 +376,26 @@ class WebSocketManager:
         self._connections -= dead
 
 
+@web.middleware
+async def origin_validation_middleware(request: web.Request, handler):
+    """
+    Reject requests with explicit Origin headers that are not allowlisted.
+    Allows CLI/missing Origin. Allows valid Chromium extension origins on HTTP.
+    OPTIONS requests from disallowed origins are also rejected.
+    """
+    origin = request.headers.get("Origin")
+    if origin is not None:
+        if not origin_allowed(origin, allow_extension=True):
+            logger.warning("Rejected HTTP origin: %s", origin or "<empty>")
+            return web.Response(text="Forbidden origin", status=403)
+    return await handler(request)
+
+
 # ---------------------------------------------------------------------------
 # Application Factory
 # ---------------------------------------------------------------------------
 
-def create_app(config: ServiceConfig = None) -> web.Application:
+def create_app(config: Optional[ServiceConfig] = None) -> web.Application:
     """
     Create and configure the aiohttp application.
 
@@ -327,16 +416,14 @@ def create_app(config: ServiceConfig = None) -> web.Application:
     http_handlers = ServerHandlers(handler)
     ws_manager = WebSocketManager(handler)
 
-    app = web.Application()
+    app = web.Application(middlewares=[origin_validation_middleware])
 
-    # CORS setup — allow local browser access
+    # CORS setup — allow local browser access.
+    # Note: origin_validation_middleware strictly validates explicit Origin headers
+    # before CORS / route handlers run, so wildcard here satisfies preflight / actual
+    # CORS headers for any allowlisted Origin (including *.sgcc.com.cn and extension origins).
     cors = aiohttp_cors.setup(app, defaults={
-        "https://jspec.com.cn": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-        ),
-        "https://www.jspec.com.cn": aiohttp_cors.ResourceOptions(
+        "*": aiohttp_cors.ResourceOptions(
             allow_credentials=True,
             expose_headers="*",
             allow_headers="*",

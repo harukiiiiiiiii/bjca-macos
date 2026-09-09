@@ -317,7 +317,8 @@ def test_sof_login_does_not_cache_plain_pin():
         handler._dev = FakeDeviceManager()
         result = await handler.sof_login(["cert-id", "123456", 0])
         assert result["retVal"] is True
-        assert handler._logged_in is True
+        assert bool(result.get("token"))
+        assert len(handler._sessions) == 1
         assert not hasattr(handler, "_last_pin")
 
     asyncio.run(run())
@@ -372,24 +373,51 @@ def test_gm3000_pin_key_uses_sha1_padded_pin():
 
 def test_sof_sign_requires_session_token():
     """Verify SOF signing requires the login token, not just global login state."""
+    import asyncio
     from bjca_service.api_handlers import APIHandler, _REQUEST_TOKEN
 
     class FakeGM3000:
+        def verify_pin(self, pin):
+            if pin == "fake-good":
+                return True, 10
+            return False, 5
+
         def ecc_sign(self, digest):
             return b"\x01" * 64
 
+    fake_gm = FakeGM3000()
+
     class FakeDeviceManager:
-        gm3000 = FakeGM3000()
+        gm3000 = fake_gm
         gm3000_cert = b"cert"
+
+        def init_device(self, idx=0, pin=""):
+            return True
 
     handler = APIHandler()
     handler._dev = FakeDeviceManager()
-    handler._logged_in = True
-    handler._session_token = "token-1"
     handler._sm2_message_digest = lambda data, cert: b"\x02" * 32
 
+    # Obtain token through real handle_request login with fake verify_pin
+    login_resp = asyncio.run(
+        handler.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "method": "SOF_LoginEx",
+                "params": ["cert-1", "fake-good", 0],
+                "id": 1,
+            }
+        )
+    )
+    assert login_resp["result"]["retVal"] is True
+    real_token = login_resp["result"]["token"]
+    assert real_token
+
+    # Tokenless signing fails
     assert handler._sign_sof_text("data") == ""
-    ctx = _REQUEST_TOKEN.set("token-1")
+
+    # Signing with real obtained token succeeds
+    ctx = _REQUEST_TOKEN.set(real_token)
     try:
         assert handler._sign_sof_text("data")
     finally:
@@ -496,7 +524,7 @@ def test_server_app_creation():
 if __name__ == "__main__":
     try:
         import pytest
-        pytest.main([__file__, "-v", "--tb=short"])
+        raise SystemExit(pytest.main([__file__, "-v", "--tb=short"]))
     except ImportError:
         tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
         passed = failed = skipped = 0
@@ -510,3 +538,4 @@ if __name__ == "__main__":
                 failed += 1
                 print(f"  FAIL  {name}: {e}")
         print(f"\n{passed} passed, {failed} failed, total {passed + failed}")
+        raise SystemExit(1 if failed else 0)

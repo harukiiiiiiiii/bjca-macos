@@ -109,6 +109,14 @@ block   = SM4-ECB-Encrypt(SM4 key, plain)[:16]
 旧版曾使用本机私有 `pin_keys.json` 映射或 `SM3(PIN)[:16]` fallback。公开版不再依赖
 `pin_keys.json`，也不会把任何个人 PIN 映射写入仓库或安装包。
 
+## 安全与会话说明
+
+- **公开文件访问**：`/data/{filename}` 仅允许访问配置中显式注册的公开文件；禁止任意路径遍历及目录逃逸。
+- **Origin 访问控制**：仅允许受信任的交易平台 HTTPS Origin（即 `jspec.com.cn`、`www.jspec.com.cn` 以及 `*.sgcc.com.cn`）及本地 Chrome 扩展（HTTP 接口）；无 Origin 的本地 CLI/原生程序同样允许访问，未授权来源将被严格阻断。
+- **无安装 Token 限制**：本地服务不要求安装授权 Token；此兼容性修复不对无 Origin 的本地程序进行身份认证，也不新增安装授权 Token 要求。
+- **WebSocket 会话绑定**：WebSocket Token 与具体连接 Socket 绑定；Socket 重连、断开或会话超时（30分钟）后旧 Token 立即失效，必须重新认证登录。
+- **HTTP 会话作用域**：HTTP 会话具备独立作用域，登出操作仅能注销请求中显式携带的自身对应 Token，无法跨连接或跨作用域注销其他会话；但本服务不保证已持有他人合法 HTTP Token 的本地程序无法使用该 Token。
+
 ## 项目结构
 
 ```

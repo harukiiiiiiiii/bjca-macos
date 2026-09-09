@@ -34,6 +34,7 @@ from datetime import datetime
 import json
 import logging
 import secrets
+import time
 from typing import Any, Callable, Dict, Optional
 
 from .config import ServiceConfig, get_config
@@ -51,6 +52,9 @@ from .pkcs11_bridge import PKCS11Bridge, get_bridge
 
 logger = logging.getLogger(__name__)
 _REQUEST_TOKEN = contextvars.ContextVar("request_token", default="")
+_REQUEST_CONNECTION = contextvars.ContextVar("request_connection", default="")
+_SESSION_TTL_SECONDS = 1800.0  # 30 minutes
+_MAX_SESSIONS = 256
 
 
 class APIError(Exception):
@@ -72,16 +76,66 @@ class APIHandler:
         self._dev = get_device_manager()
         self._cert = get_cert_manager()
         self._pkcs11 = get_bridge()
-        self._logged_in: bool = False
-        self._session_token: str = ""
+        self._sessions: dict[str, dict[str, Any]] = {}
         self._last_cert_id: str = ""
         self._last_pin_retries: int = -1
+
+    # ------------------------------------------------------------------
+    # Session Management Helpers
+    # ------------------------------------------------------------------
+
+    def _purge_sessions(self) -> None:
+        """Purge expired sessions or sessions tied to a different device object."""
+        now = time.monotonic()
+        current_gm = getattr(self._dev, "gm3000", None)
+        dead_tokens = []
+        for token, sess in self._sessions.items():
+            if now >= sess.get("expires_at", 0):
+                dead_tokens.append(token)
+            elif "gm3000" in sess and (
+                current_gm is None or sess.get("gm3000") is not current_gm
+            ):
+                dead_tokens.append(token)
+        for token in dead_tokens:
+            self._sessions.pop(token, None)
+
+    def _revoke_current_session(self) -> None:
+        """Revoke session for the current caller scope only.
+
+        If in a WebSocket connection context, revokes that connection's sessions.
+        Otherwise (HTTP scope), revokes the presented token only if its recorded
+        scope is also exactly empty (HTTP). Does not alter other sessions.
+        """
+        conn_id = _REQUEST_CONNECTION.get()
+        if conn_id:
+            self._cleanup_connection(conn_id)
+        else:
+            token = _REQUEST_TOKEN.get()
+            if token:
+                sess = self._sessions.get(token)
+                if sess and sess.get("connection_id", "") == "":
+                    self._sessions.pop(token, None)
+
+    def _cleanup_connection(self, connection_id: str) -> None:
+        """Invalidate all sessions associated with a specific connection scope."""
+        if not connection_id:
+            return
+        dead_tokens = [
+            t for t, s in self._sessions.items()
+            if s.get("connection_id") == connection_id
+        ]
+        for token in dead_tokens:
+            self._sessions.pop(token, None)
+
+    def _clear_all_sessions(self) -> None:
+        """Clear all session authentication records."""
+        self._sessions.clear()
 
     # ------------------------------------------------------------------
     # Request dispatcher
     # ------------------------------------------------------------------
 
-    async def handle_request(self, request_data: dict) -> dict:
+    async def handle_request(self, request_data: dict, *, connection_id: str = "") -> dict:
         """
         Handle a JSON-RPC request and return the response.
 
@@ -90,10 +144,25 @@ class APIHandler:
         method = request_data.get("method", "")
         params = request_data.get("params", {})
         req_id = request_data.get("id", 0)
-        request_token = request_data.get("token", "")
-        if not request_token and isinstance(params, dict):
-            request_token = params.get("token", "")
-        token_context = _REQUEST_TOKEN.set(str(request_token or ""))
+
+        # Extract explicit token from top-level or dict params
+        token_candidate = None
+        if "token" in request_data:
+            token_candidate = request_data["token"]
+        elif isinstance(params, dict) and "token" in params:
+            token_candidate = params["token"]
+
+        if token_candidate is not None:
+            if isinstance(token_candidate, str):
+                request_token = token_candidate
+            else:
+                # Explicit non-string token candidate is rejected as invalid token
+                request_token = "\x00invalid\x00"
+        else:
+            request_token = ""
+
+        token_context = _REQUEST_TOKEN.set(request_token)
+        conn_context = _REQUEST_CONNECTION.set(str(connection_id or ""))
 
         try:
             handler = self._get_handler(method)
@@ -114,6 +183,7 @@ class APIHandler:
             return self._error(req_id, -32603, str(e))
         finally:
             _REQUEST_TOKEN.reset(token_context)
+            _REQUEST_CONNECTION.reset(conn_context)
 
     # ------------------------------------------------------------------
     # Health Check (mirrors mod_health.c → /health)
@@ -160,7 +230,10 @@ class APIHandler:
 
     async def close_device(self, params: dict = None) -> dict:
         """Close device connection."""
-        self._dev.close_device()
+        try:
+            self._dev.close_device()
+        finally:
+            self._clear_all_sessions()
         return {"closed": True}
 
     # ------------------------------------------------------------------
@@ -662,13 +735,36 @@ class APIHandler:
         """SOF_Login/SOF_LoginEx — verify token PIN and cache login state."""
         cert_id = str(self._param(params, 0, "CertID", "") or "")
         pin = str(self._param(params, 1, "PassWd", "") or "")
+        conn_id = _REQUEST_CONNECTION.get()
+        req_token = _REQUEST_TOKEN.get()
+
         gm = self._dev.gm3000
         if gm is None:
-            self._dev.init_device(0)
-            gm = self._dev.gm3000
+            try:
+                self._dev.init_device(0)
+                gm = self._dev.gm3000
+            except Exception as e:
+                logger.warning("SOF_Login device initialization failed: %s", e)
+                gm = None
         if gm is None or not pin:
             self._last_pin_retries = -1
+            self._revoke_current_session()
             return {"retVal": False, "retValue": False}
+
+        self._purge_sessions()
+
+        # Session replacement check before capacity evaluation
+        is_relogin = False
+        if conn_id:
+            is_relogin = any(s.get("connection_id") == conn_id for s in self._sessions.values())
+        elif req_token:
+            sess = self._sessions.get(req_token)
+            is_relogin = bool(sess and sess.get("connection_id", "") == "")
+
+        if not is_relogin and len(self._sessions) >= _MAX_SESSIONS:
+            logger.warning("SOF session capacity exceeded (%d records)", len(self._sessions))
+            return {"retVal": False, "retValue": False}
+
         try:
             ok, retries = gm.verify_pin(pin)
         except Exception as e:
@@ -676,27 +772,59 @@ class APIHandler:
             ok, retries = False, -1
         self._last_pin_retries = retries
         if ok:
-            self._logged_in = True
-            self._session_token = secrets.token_hex(16)
+            # Revoke existing session for caller scope upon successful relogin
+            self._revoke_current_session()
+
+            session_token = secrets.token_hex(16)
+            self._sessions[session_token] = {
+                "connection_id": conn_id,
+                "expires_at": time.monotonic() + _SESSION_TTL_SECONDS,
+                "gm3000": gm,
+                "cert_id": cert_id or self._last_cert_id,
+            }
             self._last_cert_id = cert_id or self._last_cert_id
             return {
                 "retVal": True,
                 "retValue": True,
-                "token": self._session_token,
+                "token": session_token,
             }
-        self._logged_in = False
-        self._session_token = ""
+
+        # Failed PIN login on this caller/connection revokes only caller scope
+        self._revoke_current_session()
         return {"retVal": False, "retValue": False}
 
     async def sof_logout(self, params: dict = None) -> dict:
         """SOF_Logout — clear cached login state."""
-        self._logged_in = False
-        self._session_token = ""
+        token = _REQUEST_TOKEN.get()
+        conn_id = _REQUEST_CONNECTION.get()
+
+        if token:
+            sess = self._sessions.get(token)
+            if sess and sess.get("connection_id", "") == conn_id:
+                self._sessions.pop(token, None)
+        elif conn_id:
+            # Token omitted in WS connection: logout current WS connection's session
+            self._cleanup_connection(conn_id)
+        # If tokenless on HTTP, no-op (cannot revoke others)
+
         return {"retVal": True, "retValue": True}
 
     async def sof_is_login(self, params: dict = None) -> dict:
         """SOF_IsLogin — report whether a PIN was verified in this session."""
-        return {"retVal": self._logged_in, "retValue": self._logged_in}
+        token = _REQUEST_TOKEN.get()
+        conn_id = _REQUEST_CONNECTION.get()
+        self._purge_sessions()
+
+        if token:
+            return {"retVal": self._token_valid(), "retValue": self._token_valid()}
+
+        if conn_id:
+            # Token omitted in WS connection: check if current WS connection has an active session
+            for sess in self._sessions.values():
+                if sess.get("connection_id") == conn_id:
+                    return {"retVal": True, "retValue": True}
+
+        return {"retVal": False, "retValue": False}
 
     async def sof_get_pin_retry_count(self, params: dict = None) -> dict:
         """SOF_GetPinRetryCount — return the last known retry count."""
@@ -939,12 +1067,24 @@ class APIHandler:
 
     def _token_valid(self) -> bool:
         token = _REQUEST_TOKEN.get()
-        return bool(
-            self._logged_in
-            and self._session_token
-            and token
-            and secrets.compare_digest(token, self._session_token)
-        )
+        if not token:
+            return False
+
+        self._purge_sessions()
+        sess = self._sessions.get(token)
+        if not sess:
+            return False
+
+        # Transport scope match:
+        # If the session was created within a connection (WS connection),
+        # requests using this token must come from the matching connection.
+        # If created without connection (HTTP), request connection must also be empty.
+        conn_id = _REQUEST_CONNECTION.get()
+        sess_conn_id = sess.get("connection_id", "")
+        if sess_conn_id != conn_id:
+            return False
+
+        return True
 
     @staticmethod
     def _sof_time(value: str) -> str:
@@ -966,10 +1106,14 @@ class APIHandler:
             return ""
         try:
             if pin:
-                ok, retries = gm.verify_pin(pin)
+                try:
+                    ok, retries = gm.verify_pin(pin)
+                except Exception:
+                    self._revoke_current_session()
+                    raise
                 self._last_pin_retries = retries
                 if not ok:
-                    self._logged_in = False
+                    self._revoke_current_session()
                     return ""
             data = text.encode("utf-8")
             digest = self._sm2_message_digest(data, self._dev.gm3000_cert)
@@ -993,10 +1137,14 @@ class APIHandler:
 
         try:
             if pin:
-                ok, retries = gm.verify_pin(pin)
+                try:
+                    ok, retries = gm.verify_pin(pin)
+                except Exception:
+                    self._revoke_current_session()
+                    raise
                 self._last_pin_retries = retries
                 if not ok:
-                    self._logged_in = False
+                    self._revoke_current_session()
                     return ""
 
             content = text.encode("utf-8")
