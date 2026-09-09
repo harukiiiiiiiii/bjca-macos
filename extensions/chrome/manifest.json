@@ -2,12 +2,8 @@
   "manifest_version": 3,
   "name": "BJCA Certificate Bridge (macOS)",
   "version": "2.1.0",
-  "description": "Replaces the Windows ActiveX control with native macOS WebSocket bridge for BJCA USB Key operations.",
-  "permissions": [
-    "nativeMessaging",
-    "webRequest",
-    "activeTab"
-  ],
+  "description": "Native macOS WebSocket bridge for BJCA USB Key operations.",
+  "permissions": [],
   "host_permissions": [
     "https://127.0.0.1:21061/*",
     "https://jspec.com.cn/*",
