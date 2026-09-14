@@ -1,4 +1,4 @@
-# BJCA UKey Service 2.1 安装指南
+# BJCA UKey Service 2.1.1 安装指南
 
 ## 安装前准备
 
@@ -46,7 +46,7 @@
 打开 `https://127.0.0.1:21061/health`，确认：
 
 - `status` 为 `ok`；
-- `version` 为 `2.1.0`；
+- `version` 为 `2.1.1`；
 - 插入 UKey 后，`devices_connected` 为 `1`。
 
 ## 常见情况

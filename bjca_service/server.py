@@ -620,7 +620,7 @@ def main():
 
     # Setup logging
     setup_logging(config)
-    logger.info("Starting BJCA Certificate Environment Service v2.1.0")
+    logger.info("Starting BJCA Certificate Environment Service v2.1.1")
     logger.info(f"  Listening on: {config.listen_host}:{config.listen_port}")
     logger.info(f"  WebSocket: wss://{config.listen_host}:{config.listen_port}/xtxapp")
     logger.info(f"  Health: http://{config.listen_host}:{config.listen_port}/health")

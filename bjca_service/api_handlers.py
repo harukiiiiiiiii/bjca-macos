@@ -194,7 +194,7 @@ class APIHandler:
         config = get_config()
         return {
             "status": "ok",
-            "version": "2.1.0",
+            "version": "2.1.1",
             "service": "BJCA Certificate Environment (macOS)",
             "timestamp": __import__("time").strftime(
                 "%Y-%m-%dT%H:%M:%SZ",
@@ -911,7 +911,7 @@ class APIHandler:
 
     async def sof_get_version(self, params: dict = None) -> dict:
         """SOF_GetVersion/SOF_GetProductVersion."""
-        return {"retVal": "BJCA-macOS-2.1.0", "retValue": "BJCA-macOS-2.1.0"}
+        return {"retVal": "BJCA-macOS-2.1.1", "retValue": "BJCA-macOS-2.1.1"}
 
     async def sof_get_last_error(self, params: dict = None) -> dict:
         """SOF_GetLastError/SOF_GetLastErrMsg."""

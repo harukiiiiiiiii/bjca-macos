@@ -12,7 +12,7 @@ DIST_DIR="$ROOT_DIR/dist"
 PKG_ID="cn.com.jspec.bjca-macos"
 PKG_NAME="BJCA-UKey-Service.pkg"
 DMG_NAME="BJCA-UKey-Service.dmg"
-VERSION="2.1.0"
+VERSION="2.1.1"
 
 SITE_PACKAGES="$(python3 - <<'PY'
 import site
