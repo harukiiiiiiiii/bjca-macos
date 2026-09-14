@@ -211,15 +211,18 @@ BJCA UKey Service 安装说明
 
 1. 双击 BJCA-UKey-Service.pkg 安装；已安装 2.0 时会自动覆盖升级。
 2. 安装完成后，本地服务会自动启动，原有本地证书会保留。
-3. 服务地址：https://127.0.0.1:21061
-4. 健康检查：https://127.0.0.1:21061/health
-5. 插入或拔出已支持的 UKey 后，系统会弹出“UKey 已插入 / UKey 已拔出”通知。
-6. macOS 后台项目中会显示为 BJCA UKey Service。
-7. Chrome 打开 chrome://extensions，启用“开发者模式”。
-8. 点击“加载已解压的扩展程序”，选择 /Users/Shared/BJCA-Chrome-Extension。
-9. 重新打开交易平台证书登录页。
+3. 首次使用或新证书信任：打开终端执行以下命令将本地证书添加到当前用户信任（若弹出密码请输入 Mac 登录密码）：
+   security add-trusted-cert -r trustRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$HOME/.bjca/certs/server.crt"
+4. 完全退出 Chrome（Command + Q）并重新打开，访问验证地址：https://127.0.0.1:21061/health
+   页面应直接显示 status: ok 且无证书安全警告（切勿使用点击高级跳过警告的方式）。
+5. 服务地址：https://127.0.0.1:21061
+6. 插入或拔出已支持的 UKey 后，系统会弹出“UKey 已插入 / UKey 已拔出”通知（devices_connected 为 1 表示识别到 UKey）。
+7. macOS 后台项目中会显示为 BJCA UKey Service。
+8. Chrome 打开 chrome://extensions，启用“开发者模式”。
+9. 点击“加载已解压的扩展程序”，选择 /Users/Shared/BJCA-Chrome-Extension。
+10. 重新打开交易平台证书登录页。
 
-详细步骤请看同目录的“安装指南.md”。
+详细步骤与故障排查请看同目录的“安装指南.md”。
 
 已验证：Longmai GM3000 / 兼容证书登录页面。
 TXT

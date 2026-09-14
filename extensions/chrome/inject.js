@@ -51,7 +51,7 @@
       banner.append(title, message, close);
     } else {
       title.textContent = 'BJCA 本地服务无法安全连接';
-      message.textContent = '通常是本地证书尚未被 Chrome 信任，也可能是服务未启动。请打开检查页，在警告页点击“高级”→“继续访问 127.0.0.1（不安全）”，看到 status: ok 后返回并刷新交易中心。';
+      message.textContent = '通常是本地证书尚未被 Chrome 信任，也可能是服务未启动。若证书出现警告，请参照安装指南中的“信任本地证书”步骤设置 SSL 信任，并完全退出重新打开 Chrome。';
 
       const link = document.createElement('a');
       link.href = 'https://127.0.0.1:21061/health';
