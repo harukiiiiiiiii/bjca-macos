@@ -1,4 +1,4 @@
-# BJCA UKey Service 2.1.1 安装指南
+# BJCA UKey Service 2.1.2 安装指南
 
 ## 安装前准备
 
@@ -67,7 +67,7 @@
 
 - 页面正常打开，无证书不安全警告；
 - `status` 为 `ok`（服务运行健康）；
-- `version` 为 `2.1.1`；
+- `version` 为 `2.1.2`；
 - 插入 UKey 后，`devices_connected` 为 `1`（已识别硬件）。
 
 ## 常见情况

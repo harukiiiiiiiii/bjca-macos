@@ -301,57 +301,66 @@ class GM3000HID:
     def export_certificate(self, sign: bool = True) -> bytes:
         """
         SKF_ExportCertificate. Capture shows a prepare call (C0 52 ...) then
-        one or more read calls (80 4E ...). Returns DER certificate bytes.
-
-        The read response is framed as:
-            [00 00][len_BE:2][DER...]   on the first read
-            [off_BE:2][DER...]          on subsequent reads (placed at offset)
-        We assemble into a fixed-size buffer using the declared length.
+        one or more read calls (80 4E ...). The first chunk has a four-byte
+        length prefix; later chunks continue the DER bytes without a prefix.
+        Each chunk ends in 6A9E (more data) or 9000 (complete).
         """
         # Prepare / get length — SW may be embedded non-standardly; proceed if
         # the device returns a usable response.
         _, sw = self.transceive(bytes([0xC0, 0x52, 0x00, 0x00]))
         logger.debug("ExportCertificate prepare sw=0x%04x", sw)
 
-        raw_chunks = []
+        certificate = bytearray()
         cert_len = None
         for _ in range(16):
             seq = self._next_seq()
             apdu = bytes([0x80, 0x4E, 0x01, 0x00, 0x00, 0x00, 0x04, 0x10, 0x00, 0x30, 0x01, 0x00, 0x00])
             self._dev.write(list(self._build_tx_single(apdu, seq)))
             head = self._read_report(5000)
-            if head[2] != 0xAA or head[3] != 0xAA:
+            if len(head) != REPORT_SIZE or head[2:4] != b"\xaa\xaa":
                 raise GM3000Error("bad cert read response header")
-            total_len = head[4] | (head[5] << 8)
-            buf = bytearray(head[HEADER_PAYLOAD_OFFSET:])
+            # Wire length includes the sequence, payload kind and status bytes.
+            total_len = (head[4] | (head[5] << 8)) - 3
+            if not 2 <= total_len <= 40 + 128 * 63:
+                raise GM3000Error("invalid cert response length")
+            buf = bytearray(head[HEADER_PAYLOAD_OFFSET:HEADER_PAYLOAD_OFFSET + total_len])
+            reports = 0
             while len(buf) < total_len:
+                reports += 1
+                if reports > 128:
+                    raise GM3000Error("too many cert continuation reports")
                 cont = self._read_report(5000)
+                if len(cont) != REPORT_SIZE or (cont[1] >> 6) not in (0, 1):
+                    raise GM3000Error("bad cert continuation report")
                 if (cont[1] >> 6) == 0b01:
                     n = cont[1] & 0x3F
                     buf.extend(cont[CONT_PAYLOAD_OFFSET:CONT_PAYLOAD_OFFSET + n])
                     break
                 buf.extend(cont[CONT_PAYLOAD_OFFSET:])
-            raw_chunks.append(bytes(buf[:total_len]))
+            if len(buf) != total_len:
+                raise GM3000Error("incomplete cert response")
+            sw = int.from_bytes(buf[-2:], "big")
+            if sw not in (0x6A9E, SW_OK):
+                raise GM3000Error(f"certificate read failed: 0x{sw:04x}")
+            chunk = buf[:-2]
             if cert_len is None:
-                cert_len = (buf[2] << 8) | buf[3]
-                if len(buf) - 4 >= cert_len:   # all data fits in one chunk
-                    break
-            else:
-                break  # standard two-chunk read
-
-        c1 = raw_chunks[0][4:]  # DER, tail may be corrupted by HID padding
-        c2 = b''.join(raw_chunks[1:])
-        from cryptography import x509 as _x509
-        for g1 in range(0, min(16, len(c1))):
-            candidate = (c1[:len(c1) - g1] + c2)[:cert_len]
-            if len(candidate) < cert_len:
-                continue
-            try:
-                _x509.load_der_x509_certificate(candidate)
-                return candidate
-            except Exception:
-                continue
-        return (c1 + c2)[:cert_len]
+                if len(chunk) < 4 or chunk[:2] != b"\x00\x00":
+                    raise GM3000Error("bad certificate length prefix")
+                cert_len = int.from_bytes(chunk[2:4], "big")
+                chunk = chunk[4:]
+            certificate.extend(chunk)
+            if len(certificate) > cert_len:
+                raise GM3000Error("certificate exceeds declared length")
+            if sw == SW_OK:
+                if not cert_len or len(certificate) != cert_len:
+                    raise GM3000Error("incomplete certificate")
+                from cryptography import x509
+                try:
+                    x509.load_der_x509_certificate(bytes(certificate))
+                except ValueError as exc:
+                    raise GM3000Error("invalid DER certificate") from exc
+                return bytes(certificate)
+        raise GM3000Error("too many certificate chunks")
 
     def get_container_type(self, name: str = "personalCert00") -> int:
         """SKF_GetContainerType — returns 1=RSA, 2=ECC(SM2)."""

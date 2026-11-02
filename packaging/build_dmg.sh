@@ -12,13 +12,13 @@ DIST_DIR="$ROOT_DIR/dist"
 PKG_ID="cn.com.jspec.bjca-macos"
 PKG_NAME="BJCA-UKey-Service.pkg"
 DMG_NAME="BJCA-UKey-Service.dmg"
-VERSION="2.1.1"
+VERSION="2.1.2"
 
-SITE_PACKAGES="$(python3 - <<'PY'
+SITE_PACKAGES="${SITE_PACKAGES:-$(python3 - <<'PY'
 import site
 print(site.getusersitepackages())
 PY
-)"
+)}"
 
 echo "Building BJCA UKey DMG..."
 rm -rf "$BUILD_DIR" "$DIST_DIR"
@@ -36,6 +36,11 @@ echo "Copying Python vendor dependencies..."
 VENDOR="$PAYLOAD_DIR/Library/Application Support/BJCA-UKey-Service/vendor"
 mkdir -p "$VENDOR"
 python3 "$ROOT_DIR/packaging/copy_vendor.py" "$SITE_PACKAGES" "$VENDOR"
+PYTHONNOUSERSITE=1 PYTHONPATH="$VENDOR" python3 - <<'PY'
+from cryptography.x509 import Certificate
+if not hasattr(Certificate, "not_valid_before_utc"):
+    raise SystemExit("Packaged cryptography must be >=42.0.0; select compatible SITE_PACKAGES")
+PY
 
 cat > "$SCRIPTS_DIR/preinstall" <<'SCRIPT'
 #!/bin/bash
